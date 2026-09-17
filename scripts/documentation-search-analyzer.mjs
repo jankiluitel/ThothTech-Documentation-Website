@@ -11,6 +11,8 @@ const results = {
   weakTitles: [],
   internalLinks: 0,
   orphanedDocuments: [],
+  duplicateTitles: [],
+  similarTitles: [],
 };
 
 const WEAK_TITLES = new Set([
@@ -25,8 +27,29 @@ const WEAK_TITLES = new Set([
   "research",
 ]);
 
+const TITLE_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "for",
+  "in",
+  "of",
+  "on",
+  "the",
+  "to",
+  "with",
+]);
+
+const SIMILARITY_THRESHOLD = 0.8;
+
+/*
+ * Find all Markdown and MDX documentation files recursively.
+ */
 function getDocumentationFiles(directory) {
-  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  const entries = fs.readdirSync(directory, {
+    withFileTypes: true,
+  });
+
   const files = [];
 
   for (const entry of entries) {
@@ -36,7 +59,8 @@ function getDocumentationFiles(directory) {
       files.push(...getDocumentationFiles(fullPath));
     } else if (
       entry.isFile() &&
-      (entry.name.endsWith(".md") || entry.name.endsWith(".mdx"))
+      (entry.name.endsWith(".md") ||
+        entry.name.endsWith(".mdx"))
     ) {
       files.push(fullPath);
     }
@@ -45,6 +69,9 @@ function getDocumentationFiles(directory) {
   return files;
 }
 
+/*
+ * Extract YAML-style frontmatter.
+ */
 function extractFrontmatter(content) {
   if (!content.startsWith("---")) {
     return null;
@@ -59,6 +86,9 @@ function extractFrontmatter(content) {
   return content.slice(3, end).trim();
 }
 
+/*
+ * Retrieve a simple scalar value from frontmatter.
+ */
 function getFrontmatterValue(frontmatter, key) {
   if (!frontmatter) {
     return null;
@@ -81,15 +111,18 @@ function getFrontmatterValue(frontmatter, key) {
   return null;
 }
 
+/*
+ * Return a repository-relative file path for readable reports.
+ */
 function relativeFile(file) {
   return path.relative(process.cwd(), file);
 }
 
 /*
- * Convert a documentation file path into the route used
- * by the generated Starlight website.
+ * Convert a documentation file path into a normalized
+ * Starlight-style route.
  *
- * Examples:
+ * Example:
  *
  * Products/SplashKit/02-setting-up.mdx
  * -> products/splashkit/02-setting-up
@@ -128,16 +161,23 @@ function normaliseDocumentPath(file) {
 function extractLinks(content) {
   const links = new Set();
 
-  const markdownPattern = /!?\[[^\]]*\]\(([^)]+)\)/g;
-  const hrefPattern = /\bhref\s*=\s*["']([^"']+)["']/gi;
+  const markdownPattern =
+    /!?\[[^\]]*\]\(([^)]+)\)/g;
+
+  const hrefPattern =
+    /\bhref\s*=\s*["']([^"']+)["']/gi;
 
   let match;
 
-  while ((match = markdownPattern.exec(content)) !== null) {
+  while (
+    (match = markdownPattern.exec(content)) !== null
+  ) {
     links.add(match[1].trim());
   }
 
-  while ((match = hrefPattern.exec(content)) !== null) {
+  while (
+    (match = hrefPattern.exec(content)) !== null
+  ) {
     links.add(match[1].trim());
   }
 
@@ -145,8 +185,8 @@ function extractLinks(content) {
 }
 
 /*
- * Resolve a link into the same normalized route format
- * used by normaliseDocumentPath().
+ * Resolve an internal link into the same normalized route
+ * format used by normaliseDocumentPath().
  */
 function resolveInternalLink(sourceFile, link) {
   if (
@@ -173,7 +213,7 @@ function resolveInternalLink(sourceFile, link) {
   try {
     cleanLink = decodeURIComponent(cleanLink);
   } catch {
-    // Keep the original value if decoding fails.
+    // Keep the original link if URI decoding fails.
   }
 
   cleanLink = cleanLink.replace(/\\/g, "/");
@@ -183,11 +223,17 @@ function resolveInternalLink(sourceFile, link) {
   if (cleanLink.startsWith("/")) {
     resolved = cleanLink.replace(/^\/+/, "");
   } else {
-    const sourceRoute = normaliseDocumentPath(sourceFile);
-    const sourceDirectory = path.posix.dirname(sourceRoute);
+    const sourceRoute =
+      normaliseDocumentPath(sourceFile);
+
+    const sourceDirectory =
+      path.posix.dirname(sourceRoute);
 
     resolved = path.posix.normalize(
-      path.posix.join(sourceDirectory, cleanLink),
+      path.posix.join(
+        sourceDirectory,
+        cleanLink,
+      ),
     );
   }
 
@@ -196,10 +242,6 @@ function resolveInternalLink(sourceFile, link) {
     .replace(/\/index$/i, "")
     .replace(/^\/+|\/+$/g, "");
 
-  /*
-   * Starlight generates lowercase URL routes and converts
-   * spaces in file/directory names to hyphens.
-   */
   return resolved
     .split("/")
     .map((segment) =>
@@ -211,19 +253,32 @@ function resolveInternalLink(sourceFile, link) {
     .join("/");
 }
 
+/*
+ * Analyse title and description metadata.
+ */
 function analyseDocument(file) {
   const content = fs.readFileSync(file, "utf8");
-  const frontmatter = extractFrontmatter(content);
+  const frontmatter =
+    extractFrontmatter(content);
 
-  const title = getFrontmatterValue(frontmatter, "title");
+  const title =
+    getFrontmatterValue(frontmatter, "title");
+
   const description =
-    getFrontmatterValue(frontmatter, "description");
+    getFrontmatterValue(
+      frontmatter,
+      "description",
+    );
 
   results.totalDocuments++;
 
   if (!title) {
-    results.missingTitle.push(relativeFile(file));
-  } else if (WEAK_TITLES.has(title.toLowerCase())) {
+    results.missingTitle.push(
+      relativeFile(file),
+    );
+  } else if (
+    WEAK_TITLES.has(title.toLowerCase())
+  ) {
     results.weakTitles.push({
       file: relativeFile(file),
       title,
@@ -231,24 +286,32 @@ function analyseDocument(file) {
   }
 
   if (description === null) {
-    results.missingDescription.push(relativeFile(file));
+    results.missingDescription.push(
+      relativeFile(file),
+    );
   } else if (description.length === 0) {
-    results.emptyDescription.push(relativeFile(file));
+    results.emptyDescription.push(
+      relativeFile(file),
+    );
   }
 }
 
 /*
  * Build a graph of relationships between documentation pages.
  *
- * A page with no incoming links is reported as potentially
- * orphaned rather than definitely orphaned because it may still
- * be discoverable through Starlight navigation or search.
+ * Pages without incoming content links are reported as
+ * potentially orphaned. They may still be discoverable through
+ * Starlight navigation or search, so this is intentionally
+ * treated as an informational signal.
  */
 function analyseLinkGraph(files) {
   const routeToFile = new Map();
 
   for (const file of files) {
-    routeToFile.set(normaliseDocumentPath(file), file);
+    routeToFile.set(
+      normaliseDocumentPath(file),
+      file,
+    );
   }
 
   const incomingLinks = new Map();
@@ -258,11 +321,18 @@ function analyseLinkGraph(files) {
   }
 
   for (const file of files) {
-    const content = fs.readFileSync(file, "utf8");
+    const content = fs.readFileSync(
+      file,
+      "utf8",
+    );
+
     const links = extractLinks(content);
 
     for (const link of links) {
-      const target = resolveInternalLink(file, link);
+      const target = resolveInternalLink(
+        file,
+        link,
+      );
 
       if (!target) {
         continue;
@@ -279,22 +349,191 @@ function analyseLinkGraph(files) {
     }
   }
 
-  for (const [route, incomingCount] of incomingLinks) {
+  for (
+    const [route, incomingCount]
+    of incomingLinks
+  ) {
     if (incomingCount === 0) {
       results.orphanedDocuments.push(
-        relativeFile(routeToFile.get(route)),
+        relativeFile(
+          routeToFile.get(route),
+        ),
       );
     }
   }
 }
 
+/*
+ * Normalize a documentation title for comparison.
+ */
+function normaliseTitle(title) {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/*
+ * Convert a title into meaningful word tokens.
+ */
+function titleTokens(title) {
+  return new Set(
+    normaliseTitle(title)
+      .split(" ")
+      .filter(
+        (token) =>
+          token.length > 1 &&
+          !TITLE_STOP_WORDS.has(token),
+      ),
+  );
+}
+
+/*
+ * Calculate Jaccard similarity between two documentation titles.
+ *
+ * similarity =
+ * intersection(tokens A, tokens B)
+ * --------------------------------
+ * union(tokens A, tokens B)
+ */
+function calculateJaccardSimilarity(
+  titleA,
+  titleB,
+) {
+  const tokensA = titleTokens(titleA);
+  const tokensB = titleTokens(titleB);
+
+  if (
+    tokensA.size === 0 ||
+    tokensB.size === 0
+  ) {
+    return 0;
+  }
+
+  const intersection = new Set(
+    [...tokensA].filter((token) =>
+      tokensB.has(token),
+    ),
+  );
+
+  const union = new Set([
+    ...tokensA,
+    ...tokensB,
+  ]);
+
+  return (
+    intersection.size / union.size
+  );
+}
+
+/*
+ * Analyse documentation titles for exact duplicates and
+ * highly similar titles.
+ *
+ * Exact duplicates are reported separately because they are
+ * objective matches after normalization.
+ *
+ * Similar titles are informational and require human review.
+ */
+function analyseTitleSimilarity(files) {
+  const documents = [];
+
+  for (const file of files) {
+    const content = fs.readFileSync(
+      file,
+      "utf8",
+    );
+
+    const frontmatter =
+      extractFrontmatter(content);
+
+    const title =
+      getFrontmatterValue(
+        frontmatter,
+        "title",
+      );
+
+    if (title) {
+      documents.push({
+        file: relativeFile(file),
+        title,
+      });
+    }
+  }
+
+  for (
+    let i = 0;
+    i < documents.length;
+    i++
+  ) {
+    for (
+      let j = i + 1;
+      j < documents.length;
+      j++
+    ) {
+      const first = documents[i];
+      const second = documents[j];
+
+      const normalisedFirst =
+        normaliseTitle(first.title);
+
+      const normalisedSecond =
+        normaliseTitle(second.title);
+
+      /*
+       * Separate exact normalized duplicates from
+       * fuzzy similarity results.
+       */
+      if (
+        normalisedFirst ===
+        normalisedSecond
+      ) {
+        results.duplicateTitles.push({
+          first,
+          second,
+        });
+
+        continue;
+      }
+
+      const similarity =
+        calculateJaccardSimilarity(
+          first.title,
+          second.title,
+        );
+
+      if (
+        similarity >=
+        SIMILARITY_THRESHOLD
+      ) {
+        results.similarTitles.push({
+          first,
+          second,
+          similarity,
+        });
+      }
+    }
+  }
+
+  results.similarTitles.sort(
+    (a, b) =>
+      b.similarity - a.similarity,
+  );
+}
+
+/*
+ * Print a reusable report section.
+ */
 function printSection(
   title,
   items,
   formatter = (item) => item,
 ) {
   console.log(`\n${title}`);
-  console.log("-".repeat(title.length));
+  console.log(
+    "-".repeat(title.length),
+  );
 
   if (items.length === 0) {
     console.log("✓ None found");
@@ -302,14 +541,20 @@ function printSection(
   }
 
   for (const item of items) {
-    console.log(`⚠ ${formatter(item)}`);
+    console.log(
+      `⚠ ${formatter(item)}`,
+    );
   }
 }
 
+/*
+ * Print the complete documentation analysis report.
+ */
 function printReport() {
   console.log(
     "\nDocumentation Search & Discoverability Analyzer",
   );
+
   console.log(
     "==============================================",
   );
@@ -337,7 +582,8 @@ function printReport() {
     `Potentially weak titles (${results.weakTitles.length})`,
     results.weakTitles,
     (item) =>
-      `${item.file}\n  Title: "${item.title}"`,
+      `${item.file}\n` +
+      `  Title: "${item.title}"`,
   );
 
   console.log(
@@ -347,6 +593,28 @@ function printReport() {
   printSection(
     `Potentially orphaned documents (${results.orphanedDocuments.length})`,
     results.orphanedDocuments,
+  );
+
+  printSection(
+    `Exact duplicate titles (${results.duplicateTitles.length})`,
+    results.duplicateTitles,
+    (item) =>
+      `"${item.first.title}"\n` +
+      `  ${item.first.file}\n` +
+      `  ${item.second.file}`,
+  );
+
+  printSection(
+    `Potentially similar titles (${results.similarTitles.length})`,
+    results.similarTitles,
+    (item) =>
+      `${Math.round(
+        item.similarity * 100,
+      )}% similarity\n` +
+      `  "${item.first.title}"\n` +
+      `  ${item.first.file}\n` +
+      `  "${item.second.title}"\n` +
+      `  ${item.second.file}`,
   );
 
   const metadataIssues =
@@ -373,12 +641,24 @@ function printReport() {
   console.log(
     `Potentially orphaned documents: ${results.orphanedDocuments.length}`,
   );
+
+  console.log(
+    `Exact duplicate title pairs: ${results.duplicateTitles.length}`,
+  );
+
+  console.log(
+    `Potentially similar title pairs: ${results.similarTitles.length}`,
+  );
 }
 
+/*
+ * Main execution.
+ */
 if (!fs.existsSync(DOCS_DIR)) {
   console.error(
     `Documentation directory not found: ${DOCS_DIR}`,
   );
+
   process.exit(1);
 }
 
@@ -390,5 +670,6 @@ for (const file of documentationFiles) {
 }
 
 analyseLinkGraph(documentationFiles);
+analyseTitleSimilarity(documentationFiles);
 
 printReport();
